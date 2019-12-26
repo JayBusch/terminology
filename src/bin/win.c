@@ -2716,13 +2716,31 @@ _size_job(void *data)
    evas_object_size_hint_min_set(wn->backbg,
                                  info.bg_min_w,
                                  info.bg_min_h);
-   if (info.req) evas_object_resize(wn->win, info.req_w, info.req_h);
+   if (info.req)
+     evas_object_resize(wn->win, info.req_w, info.req_h);
+
+   if (EINA_TRUE)
+     {
+        Evas_Coord x, y, w, h;
+        Term *term = tc->term_first(tc);
+        if (!term)
+          return;
+
+        evas_object_geometry_get(term->bg, &x, &y, &w, &h);
+        ERR("bg: w:%d h:%d", w, h);
+        evas_object_geometry_get(term->core, &x, &y, &w, &h);
+        ERR("core: w:%d h:%d", w, h);
+        evas_object_geometry_get(term->termio, &x, &y, &w, &h);
+        ERR("termio: w:%d h:%d", w, h);
+     }
 }
 
 void
 win_sizing_handle(Win *wn)
 {
-   if (wn->size_job) ecore_job_del(wn->size_job);
+   ERR("foo");
+   if (wn->size_job)
+     ecore_job_del(wn->size_job);
    _size_job(wn);
 }
 
@@ -2749,7 +2767,8 @@ _cb_size_hint(void *data,
    term->req_w = w - mw + rw;
    term->req_h = h - mh + rh;
 
-   if (term->wn->size_job) ecore_job_del(term->wn->size_job);
+   if (term->wn->size_job)
+     ecore_job_del(term->wn->size_job);
    term->wn->size_job = ecore_job_add(_size_job, term->wn);
 }
 
