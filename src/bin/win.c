@@ -71,7 +71,6 @@ struct _Tabbar
 {
    struct {
       Evas_Object *box;
-      Eina_List *tabs;
    } l, r;
 };
 
@@ -95,6 +94,7 @@ struct _Term
    Evas_Object *tab_spacer;
    Evas_Object *tab_region_base;
    Evas_Object *tab_region_bg;
+   Evas_Object *main_tab;
    Eina_List   *popmedia_queue;
    Ecore_Timer *sendfile_request_hide_timer;
    Ecore_Timer *sendfile_progress_hide_timer;
@@ -137,6 +137,8 @@ struct _Tabs {
      Evas_Object *selector_bg;
      Eina_List *tabs; // Tab_Item
      Tab_Item *current;
+     double tab_orig_pos;
+     double hysteresis_step;
 };
 
 struct _Split
@@ -199,6 +201,42 @@ static void _term_tabregion_free(Term *term);
 static void _set_trans(Config *config, Evas_Object *bg, Evas_Object *base);
 static void _imf_event_commit_cb(void *data, Ecore_IMF_Context *_ctx EINA_UNUSED, void *event);
 
+static void
+_term_geom_dump(const Term *term)
+{
+   Evas_Coord x, y, w, h;
+return;
+
+   ERR("---");
+   evas_object_geometry_get(term->wn->win, &x, &y, &w, &h);
+   ERR("win: x:%d y:%d w:%d h:%d", x, y, w, h);
+   evas_object_geometry_get(term->bg, &x, &y, &w, &h);
+   ERR("bg: x:%d y:%d w:%d h:%d", x, y, w, h);
+   evas_object_geometry_get(term->core, &x, &y, &w, &h);
+   ERR("core: x:%d y:%d w:%d h:%d", x, y, w, h);
+   evas_object_geometry_get(term->termio, &x, &y, &w, &h);
+   ERR("termio: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "base", &x, &y, &w, &h);
+   ERR("bg.base: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "terminology.content", &x, &y, &w, &h);
+   ERR("bg.content: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "terminology.tabregion", &x, &y, &w, &h);
+   ERR("bg.tabregion: x:%d y:%d w:%d h:%d", x, y, w, h);
+   evas_object_geometry_get(term->tab_region_bg, &x, &y, &w, &h);
+   ERR("rect bg.tabregion: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(elm_layout_edje_get(term->core), "terminology.tabregion", &x, &y, &w, &h);
+   ERR("core.tabregion: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "core.content", &x, &y, &w, &h);
+   evas_object_geometry_get(term->tab_region_base, &x, &y, &w, &h);
+   ERR("rect core.tabregion: x:%d y:%d w:%d h:%d", x, y, w, h);
+   ERR("core.content: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "viewregion", &x, &y, &w, &h);
+   ERR("bg.viewregion: x:%d y:%d w:%d h:%d", x, y, w, h);
+   edje_object_part_geometry_get(term->bg_edj, "terminology.main_tab", &x, &y, &w, &h);
+   ERR("bg.main_tab: x:%d y:%d w:%d h:%d", x, y, w, h);
+   evas_object_geometry_get(term->main_tab, &x, &y, &w, &h);
+   ERR("main_tab: x:%d y:%d w:%d h:%d", x, y, w, h);
+}
 /* }}} */
 /* {{{ Scale */
 static void
@@ -2721,17 +2759,11 @@ _size_job(void *data)
 
    if (EINA_TRUE)
      {
-        Evas_Coord x, y, w, h;
         Term *term = tc->term_first(tc);
         if (!term)
           return;
 
-        evas_object_geometry_get(term->bg, &x, &y, &w, &h);
-        ERR("bg: w:%d h:%d", w, h);
-        evas_object_geometry_get(term->core, &x, &y, &w, &h);
-        ERR("core: w:%d h:%d", w, h);
-        evas_object_geometry_get(term->termio, &x, &y, &w, &h);
-        ERR("termio: w:%d h:%d", w, h);
+        _term_geom_dump(term);
      }
 }
 
@@ -2808,20 +2840,11 @@ split_vertically(Evas_Object *_win EINA_UNUSED,
 static void
 _tabbar_clear(Term *tm)
 {
-   Evas_Object *o;
+   evas_object_del(tm->tabbar.l.box);
+   tm->tabbar.l.box = NULL;
+   evas_object_del(tm->tabbar.r.box);
+   tm->tabbar.r.box = NULL;
 
-   if (tm->tabbar.l.box)
-     {
-        EINA_LIST_FREE(tm->tabbar.l.tabs, o) evas_object_del(o);
-        evas_object_del(tm->tabbar.l.box);
-        tm->tabbar.l.box = NULL;
-     }
-   if (tm->tabbar.r.box)
-     {
-        EINA_LIST_FREE(tm->tabbar.r.tabs, o) evas_object_del(o);
-        evas_object_del(tm->tabbar.r.box);
-        tm->tabbar.r.box = NULL;
-     }
    if (tm->tab_spacer)
      {
         elm_layout_signal_emit(tm->bg, "tabbar,off", "terminology");
@@ -2873,6 +2896,180 @@ _cb_tab_title(void *data,
 }
 
 static void
+_tabs_on_drag_stop(void *data,
+                   Evas_Object *o EINA_UNUSED,
+                   const char *emission EINA_UNUSED,
+                   const char *source EINA_UNUSED)
+{
+   Tabs *tabs = data;
+
+   ERR("STOP");
+   _tabs_refresh(tabs);
+}
+
+/* TODO: Could be made smarter and integrated to _tabs_on_drag() */
+static void
+_tabs_reposition_on_drag(Tabs *tabs)
+{
+   Eina_List *l;
+   Term *term;
+   Solo *solo;
+   Evas_Object *o;
+   int n = eina_list_count(tabs->tabs);
+   int active_idx = 0, i = 0;
+   Tab_Item *tab_item;
+   Evas *canvas = evas_object_evas_get(tabs->tc.wn->win);
+
+   tab_item = tabs->current;
+   assert (tab_item->tc->type == TERM_CONTAINER_TYPE_SOLO);
+   solo = (Solo*)tab_item->tc;
+   term = solo->term;
+
+   EINA_LIST_FOREACH(tabs->tabs, l, tab_item)
+     {
+        if (tab_item == tabs->current)
+          {
+             double step;
+
+             if (n > 1)
+               {
+                  step = 1.0 / (n);
+                  tabs->tab_orig_pos = (double)(i) / (double)(n - 1);
+                  tabs->hysteresis_step = 0.6 / (n - 1);
+               }
+             else
+               {
+                  step = 1.0;
+                  tabs->tab_orig_pos = 0.0;
+               }
+
+             edje_object_part_drag_size_set(term->bg_edj,
+                                            "terminology.main_tab",
+                                            step, 0.0);
+             edje_object_part_drag_value_set(term->bg_edj,
+                                             "terminology.main_tab",
+                                             tabs->tab_orig_pos, 0.0);
+             break;
+          }
+        active_idx++;
+     }
+
+   elm_box_clear(term->tabbar.l.box);
+   elm_box_clear(term->tabbar.r.box);
+
+   i = -1;
+   EINA_LIST_FOREACH(tabs->tabs, l, tab_item)
+     {
+        Evas_Coord w, h;
+        i++;
+
+        if (tab_item != tabs->current)
+          {
+             solo = (Solo*)tab_item->tc;
+             _tabbar_clear(solo->term);
+
+             o = edje_object_add(canvas);
+             theme_apply(o, term->config, "terminology/tabbar_back");
+             evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+             evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
+             edje_object_part_text_set(o, "terminology.title",
+                                       tab_item->tc->title);
+             edje_object_size_min_calc(o, &w, &h);
+             evas_object_size_hint_min_set(o, w, h);
+             assert(i != active_idx);
+             if (i < active_idx)
+               {
+                  elm_box_pack_end(term->tabbar.l.box, o);
+               }
+             else if (i > active_idx)
+               {
+                  elm_box_pack_end(term->tabbar.r.box, o);
+               }
+             if (solo->term->missed_bell)
+                 edje_object_signal_emit(o, "bell", "terminology");
+             evas_object_data_set(o, "term", term);
+             evas_object_show(o);
+             edje_object_signal_callback_add(o, "tab,activate", "terminology",
+                                             _cb_tab_activate, tab_item);
+             edje_object_signal_callback_add(o, "tab,close", "terminology",
+                                             _cb_tab_close, term);
+          }
+     }
+}
+
+static void
+_tabs_on_drag(void *data,
+              Evas_Object *o EINA_UNUSED,
+              const char *emission EINA_UNUSED,
+              const char *source EINA_UNUSED)
+{
+   Eina_List *l, *next, *prev;
+   Tabs *tabs = data;
+   double val;
+   int tab_active_idx = 0;
+   int n = eina_list_count(tabs->tabs);
+   Tab_Item *tab_item;
+   Term *term;
+   Solo *solo;
+
+   EINA_LIST_FOREACH(tabs->tabs, l, tab_item)
+     {
+        if (tab_item == tabs->current)
+          break;
+        tab_active_idx++;
+     }
+   tab_item = tabs->current;
+   assert (tab_item->tc->type == TERM_CONTAINER_TYPE_SOLO);
+   solo = (Solo*)tab_item->tc;
+   term = solo->term;
+
+   edje_object_part_drag_value_get(term->bg_edj, "terminology.main_tab",
+                                   &val, NULL);
+   if ((tab_active_idx + 1 < n) &&
+       (val > tabs->tab_orig_pos + tabs->hysteresis_step))
+     {
+        l = eina_list_nth_list(tabs->tabs, tab_active_idx);
+        next = eina_list_next(l);
+
+        tabs->tabs = eina_list_remove_list(tabs->tabs, l);
+        tabs->tabs = eina_list_append_relative_list(tabs->tabs,
+                                                    eina_list_data_get(l),
+                                                    next);
+        _tabs_reposition_on_drag(tabs);
+        return;
+     }
+   if ((tab_active_idx > 0) &&
+       (val < tabs->tab_orig_pos - tabs->hysteresis_step))
+     {
+        l = eina_list_nth_list(tabs->tabs, tab_active_idx);
+        prev = eina_list_prev(l);
+
+        tabs->tabs = eina_list_remove_list(tabs->tabs, prev);
+        tabs->tabs = eina_list_append_relative_list(tabs->tabs,
+                                               eina_list_data_get(prev),
+                                               l);
+        _tabs_reposition_on_drag(tabs);
+        return;
+     }
+   ERR("value changed to: %0.3f", val);
+}
+static void
+_cb_main_tab_change(void *data,
+                   Evas *_e EINA_UNUSED,
+                   Evas_Object *obj,
+                   void *_info EINA_UNUSED)
+{
+   Evas_Coord w, h;
+   Term *term = data;
+
+   evas_object_geometry_get(obj, NULL, NULL, &w, &h);
+   ERR("main tab w:%d h:%d", w, h);
+   evas_object_size_hint_min_set(term->tab_spacer, 1, h);
+   evas_object_size_hint_min_set(term->tab_region_base, w, h);
+   evas_object_size_hint_min_set(term->tab_region_bg, w, h);
+}
+
+static void
 _tabbar_fill(Tabs *tabs)
 {
    Eina_List *l;
@@ -2882,6 +3079,7 @@ _tabbar_fill(Tabs *tabs)
    int n = eina_list_count(tabs->tabs);
    int i = 0, j = 0;
    Tab_Item *tab_item;
+   Evas *canvas = evas_object_evas_get(tabs->tc.wn->win);
 
    EINA_LIST_FOREACH(tabs->tabs, l, tab_item)
      {
@@ -2898,36 +3096,32 @@ _tabbar_fill(Tabs *tabs)
    assert(term->tabbar.r.box == NULL);
    assert(term->tab_spacer != NULL);
 
-   if (i > 0)
-     {
-        term->tabbar.l.box = o = elm_box_add(tabs->tc.wn->win);
-        elm_box_horizontal_set(o, EINA_TRUE);
-        elm_box_homogeneous_set(o, EINA_TRUE);
-        evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
-        evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
-        elm_layout_content_set(term->bg, "terminology.tabl.content", o);
-        evas_object_show(o);
-     }
-   if (i < (n - 1))
-     {
-        term->tabbar.r.box = o = elm_box_add(tabs->tc.wn->win);
-        elm_box_horizontal_set(o, EINA_TRUE);
-        elm_box_homogeneous_set(o, EINA_TRUE);
-        evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
-        evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
-        elm_layout_content_set(term->bg, "terminology.tabr.content", o);
-        evas_object_show(o);
-     }
+   term->tabbar.l.box = o = elm_box_add(tabs->tc.wn->win);
+   elm_box_horizontal_set(o, EINA_TRUE);
+   elm_box_homogeneous_set(o, EINA_TRUE);
+   evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+   evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
+   elm_layout_content_set(term->bg, "terminology.tabl.content", o);
+   evas_object_show(o);
+
+   term->tabbar.r.box = o = elm_box_add(tabs->tc.wn->win);
+   elm_box_horizontal_set(o, EINA_TRUE);
+   elm_box_homogeneous_set(o, EINA_TRUE);
+   evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+   evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
+   elm_layout_content_set(term->bg, "terminology.tabr.content", o);
+   evas_object_show(o);
+
    EINA_LIST_FOREACH(tabs->tabs, l, tab_item)
      {
+        Evas_Coord w, h;
+
         if (tab_item != tabs->current)
           {
-             Evas_Coord w, h;
-
              solo = (Solo*)tab_item->tc;
              _tabbar_clear(solo->term);
 
-             o = edje_object_add(evas_object_evas_get(tabs->tc.wn->win));
+             o = edje_object_add(canvas);
              theme_apply(o, term->config, "terminology/tabbar_back");
              evas_object_size_hint_weight_set(o, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
              evas_object_size_hint_fill_set(o, EVAS_HINT_FILL, EVAS_HINT_FILL);
@@ -2938,12 +3132,10 @@ _tabbar_fill(Tabs *tabs)
              assert(i != j);
              if (j < i)
                {
-                  term->tabbar.l.tabs = eina_list_append(term->tabbar.l.tabs, o);
                   elm_box_pack_end(term->tabbar.l.box, o);
                }
              else if (j > i)
                {
-                  term->tabbar.r.tabs = eina_list_append(term->tabbar.r.tabs, o);
                   elm_box_pack_end(term->tabbar.r.box, o);
                }
              if (solo->term->missed_bell)
@@ -2954,8 +3146,58 @@ _tabbar_fill(Tabs *tabs)
                                              _cb_tab_activate, tab_item);
              edje_object_signal_callback_add(o, "tab,close", "terminology",
                                              _cb_tab_close, term);
-             edje_object_signal_callback_add(o, "tab,title", "terminology",
+          }
+        else
+          {
+             double step;
+             o = edje_object_add(canvas);
+             term->main_tab = o;
+
+             theme_apply(o, term->config, "terminology/tab_main");
+             elm_layout_content_set(term->bg, "terminology.main_tab", o);
+             edje_object_part_swallow(o, "terminology.tab", term->tab_spacer);
+             edje_object_part_text_set(o, "terminology.title",
+                                       tab_item->tc->title);
+             evas_object_size_hint_weight_set(o,
+                                              EVAS_HINT_EXPAND,
+                                              EVAS_HINT_EXPAND);
+             evas_object_size_hint_fill_set(o,
+                                            EVAS_HINT_FILL,
+                                            EVAS_HINT_FILL);
+             elm_layout_signal_callback_add(term->bg, "tab,drag", "*",
+                                            _tabs_on_drag, tabs);
+             elm_layout_signal_callback_add(term->bg, "tab,drag,stop", "*",
+                                            _tabs_on_drag_stop, tabs);
+             edje_object_signal_callback_add(o, "tab,title", "*",
                                              _cb_tab_title, term);
+             edje_object_signal_callback_add(o, "tab,close", "*",
+                                             _cb_tab_close, term);
+             if (n > 1)
+               {
+                  step = 1.0 / (n);
+                  tabs->tab_orig_pos = (double)(j) / (double)(n - 1);
+                  tabs->hysteresis_step = 0.6 / (n - 1);
+               }
+             else
+               {
+                  step = 1.0;
+                  tabs->tab_orig_pos = 0.0;
+               }
+
+             edje_object_part_drag_size_set(term->bg_edj,
+                                            "terminology.main_tab",
+                                            step, 0.0);
+             edje_object_part_drag_value_set(term->bg_edj,
+                                             "terminology.main_tab",
+                                             tabs->tab_orig_pos, 0.0);
+
+             edje_object_size_min_calc(o, &w, &h);
+             ERR("min: %d %d", w, h);
+             evas_object_size_hint_min_set(o, w, h);
+             evas_object_size_hint_min_set(term->tab_region_bg, w, h);
+             evas_object_event_callback_add(o, EVAS_CALLBACK_RESIZE,
+                                            _cb_main_tab_change, term);
+             evas_object_show(o);
           }
         j++;
      }
@@ -3892,20 +4134,11 @@ _tabs_refresh(Tabs *tabs)
    // this is all below just for tab bar at the top
    if (term->config->show_tabs)
      {
-        double v1, v2;
-
         elm_layout_content_set(term->bg, "terminology.tab_btn",
                                term->tab_spacer);
 
-        v1 = (double)(i-1) / (double)n;
-        v2 = (double)i / (double)n;
         elm_layout_signal_emit(term->bg, "tabcount,off", "terminology");
 
-        elm_layout_content_set(term->bg, "terminology.tab", term->tab_spacer);
-        edje_object_part_drag_value_set(term->bg_edj, "terminology.tabl", v1, 0.0);
-        edje_object_part_drag_value_set(term->bg_edj, "terminology.tabr", v2, 0.0);
-        elm_layout_text_set(term->bg, "terminology.tab.title",
-                            solo->tc.title);
         elm_layout_signal_emit(term->bg, "tabbar,on", "terminology");
         elm_layout_signal_emit(term->bg, "tab_btn,on", "terminology");
         _tabbar_fill(tabs);
@@ -5706,12 +5939,12 @@ _term_bg_config(Term *term)
                                   _cb_tab_prev, term);
    elm_layout_signal_callback_add(term->bg, "tab,next", "terminology",
                                   _cb_tab_next, term);
-   elm_layout_signal_callback_add(term->bg, "tab,close", "terminology",
-                                  _cb_tab_close, term);
-   elm_layout_signal_callback_add(term->bg, "tab,title", "terminology",
-                                   _cb_tab_title, term);
    elm_layout_content_set(term->core, "terminology.content", term->termio);
+   evas_object_size_hint_weight_set(term->termio, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+   evas_object_size_hint_fill_set(term->termio, EVAS_HINT_FILL, EVAS_HINT_FILL);
    elm_layout_content_set(term->bg, "terminology.content", term->core);
+   evas_object_size_hint_weight_set(term->core, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+   evas_object_size_hint_fill_set(term->core, EVAS_HINT_FILL, EVAS_HINT_FILL);
    elm_layout_content_set(term->bg, "terminology.miniview", term->miniview);
    if (term->popmedia)
      {
@@ -5791,9 +6024,9 @@ _cb_tabregion_change(void *data,
    Evas_Coord w, h;
 
    evas_object_geometry_get(obj, NULL, NULL, &w, &h);
+   ERR("bg set to %dx%d", w, h);
    evas_object_size_hint_min_set(term->tab_region_base, w, h);
-   elm_layout_content_set(term->core, "terminology.tabregion",
-                          term->tab_region_base);
+   _term_geom_dump(term);
 }
 
 static void
